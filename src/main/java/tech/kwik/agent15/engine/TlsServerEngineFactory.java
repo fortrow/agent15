@@ -47,6 +47,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import javax.net.ssl.X509TrustManager;
+
 import static tech.kwik.agent15.TlsConstants.SignatureScheme.*;
 
 public class TlsServerEngineFactory {
@@ -64,6 +66,8 @@ public class TlsServerEngineFactory {
     private final PrivateKey certificateKey;
     private final TlsSessionRegistry tlsSessionRegistry = new TlsSessionRegistryImpl();
     private final List<TlsConstants.SignatureScheme> preferredSignatureSchemes;
+    private X509TrustManager clientTrustManager;
+    private boolean clientAuthRequired;
 
     /**
      * Creates a tls server engine factory, given an RSA certificate and its private key.
@@ -141,7 +145,15 @@ public class TlsServerEngineFactory {
     public TlsServerEngine createServerEngine(ServerMessageSender serverMessageSender, TlsStatusEventHandler tlsStatusHandler) {
         TlsServerEngineImpl tlsServerEngine = new TlsServerEngineImpl(certificateChain, certificateKey, preferredSignatureSchemes, serverMessageSender, tlsStatusHandler, tlsSessionRegistry);
         tlsServerEngine.addSupportedCiphers(List.of(TlsConstants.CipherSuite.TLS_AES_128_GCM_SHA256));
+        if (clientTrustManager != null) {
+            tlsServerEngine.setClientAuth(clientTrustManager, clientAuthRequired);
+        }
         return tlsServerEngine;
+    }
+
+    public void setClientAuth(X509TrustManager trustManager, boolean required) {
+        this.clientTrustManager = trustManager;
+        this.clientAuthRequired = required;
     }
 
     /**

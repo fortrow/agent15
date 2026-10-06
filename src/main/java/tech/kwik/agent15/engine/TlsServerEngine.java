@@ -29,6 +29,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.function.Function;
+import javax.net.ssl.X509TrustManager;
 
 public interface TlsServerEngine extends TlsEngine {
 
@@ -73,6 +74,9 @@ public interface TlsServerEngine extends TlsEngine {
      *                  the session will not be resumed.
      */
     void setSessionDataVerificationCallback(Function<ByteBuffer, Boolean> callback);
+
+    /** Enables TLS client-certificate authentication for this server engine. */
+    void setClientAuth(X509TrustManager trustManager, boolean required);
 
     /**
      * Get the selected (negotiated) cipher suite.

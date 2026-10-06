@@ -59,29 +59,36 @@ jar {
 
 task determineVersion {
     doLast {
-        def proc = "git describe --always --dirty".execute()
-        proc.waitFor()
-        if (proc.exitValue()) {
-            logger.quiet("Building development version.")
+        def requestedVersion = project.findProperty("publicationVersion")
+        if (requestedVersion != null && !requestedVersion.toString().isBlank()) {
+            project.version = requestedVersion.toString()
+            logger.quiet("Building configured version ${project.version}.")
         }
         else {
-            def versionTag = proc.in.readLines()[0]
-            // Check that tag matches format like v1.0 or v1.0.19
-            if (versionTag ==~ /v?[0-9]+(\.\d+){1,2}/) {
-                if (versionTag.startsWith("v")) {
-                    versionTag = versionTag[1..-1]
-                }
-                logger.quiet("Building version ${versionTag}.")
+            def proc = "git describe --always --dirty".execute()
+            proc.waitFor()
+            if (proc.exitValue()) {
+                logger.quiet("Building development version.")
             }
             else {
-                logger.error("Version tag '${versionTag}' does not contain a valid version.");
+                def versionTag = proc.in.readLines()[0]
+                // Check that tag matches format like v1.0 or v1.0.19
+                if (versionTag ==~ /v?[0-9]+(\.\d+){1,2}/) {
+                    if (versionTag.startsWith("v")) {
+                        versionTag = versionTag[1..-1]
+                    }
+                    logger.quiet("Building version ${versionTag}.")
+                }
+                else {
+                    logger.error("Version tag '${versionTag}' does not contain a valid version.");
+                }
+                project.version = versionTag
             }
-            project.version = versionTag
 
             ext.versionDir = new File("${buildDir}", "generated/tech/kwik/agent15")
             versionDir.mkdirs()
 
-            new File(versionDir, "version.properties").text = versionTag
+            new File(versionDir, "version.properties").text = project.version
         }
     }
 }

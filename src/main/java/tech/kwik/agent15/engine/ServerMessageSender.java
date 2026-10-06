@@ -28,6 +28,8 @@ public interface ServerMessageSender {
 
     void send(EncryptedExtensions ee) throws IOException;
 
+    void send(CertificateRequestMessage cr) throws IOException;
+
     void send(CertificateMessage cm) throws IOException;
 
     void send(CertificateVerifyMessage cv) throws IOException;
@@ -36,4 +38,3 @@ public interface ServerMessageSender {
 
     void send(NewSessionTicketMessage ticket) throws IOException;
 }
-

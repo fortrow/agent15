@@ -45,6 +45,13 @@ public class CertificateRequestMessage extends HandshakeMessage {
         serialize();
     }
 
+    public CertificateRequestMessage(List<Extension> extensions) {
+        this.extensions = List.copyOf(extensions);
+        certificateRequestContext = new byte[0];
+
+        serialize();
+    }
+
     public CertificateRequestMessage parse(ByteBuffer buffer) throws TlsProtocolException {
         int startPosition = buffer.position();
         int remainingLength = parseHandshakeHeader(buffer, TlsConstants.HandshakeType.certificate_request, MINIMUM_MESSAGE_SIZE);

@@ -37,6 +37,10 @@ public class CertificateAuthoritiesExtension extends Extension {
         authorities.add(x500Principal);
     }
 
+    public CertificateAuthoritiesExtension(List<X500Principal> principals) {
+        authorities.addAll(principals);
+    }
+
     public CertificateAuthoritiesExtension(ByteBuffer buffer) throws DecodeErrorException {
         int extensionDataLength = parseExtensionHeader(buffer, TlsConstants.ExtensionType.certificate_authorities, 2);
 

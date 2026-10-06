@@ -26,6 +26,7 @@ import org.mockito.stubbing.Answer;
 import tech.kwik.agent15.NewSessionTicket;
 import tech.kwik.agent15.ProtectionKeysType;
 import tech.kwik.agent15.alert.DecryptErrorAlert;
+import tech.kwik.agent15.alert.BadCertificateAlert;
 import tech.kwik.agent15.alert.HandshakeFailureAlert;
 import tech.kwik.agent15.alert.IllegalParameterAlert;
 import tech.kwik.agent15.alert.MissingExtensionAlert;
@@ -34,6 +35,8 @@ import tech.kwik.agent15.engine.ServerMessageSender;
 import tech.kwik.agent15.engine.TlsStatusEventHandler;
 import tech.kwik.agent15.extension.*;
 import tech.kwik.agent15.handshake.ClientHello;
+import tech.kwik.agent15.handshake.CertificateMessage;
+import tech.kwik.agent15.handshake.CertificateRequestMessage;
 import tech.kwik.agent15.handshake.EncryptedExtensions;
 import tech.kwik.agent15.handshake.FinishedMessage;
 import tech.kwik.agent15.handshake.NewSessionTicketMessage;
@@ -50,6 +53,8 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
+
+import javax.net.ssl.X509TrustManager;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -258,6 +263,43 @@ public class TlsServerEngineTest {
         ArgumentCaptor<EncryptedExtensions> captor = ArgumentCaptor.forClass(EncryptedExtensions.class);
         verify(messageSender).send(captor.capture());
         assertThat(captor.getValue().getExtensions()).hasAtLeastOneElementOfType(ApplicationLayerProtocolNegotiationExtension.class);
+    }
+
+    @Test
+    void clientAuthSendsCertificateRequestWithAcceptedAuthorities() throws Exception {
+        X509TrustManager trustManager = mock(X509TrustManager.class);
+        when(trustManager.getAcceptedIssuers()).thenReturn(new X509Certificate[] { serverCertificate });
+        engine.setClientAuth(trustManager, true);
+
+        engine.received(createDefaultClientHello(), ProtectionKeysType.None);
+
+        ArgumentCaptor<CertificateRequestMessage> captor = ArgumentCaptor.forClass(CertificateRequestMessage.class);
+        verify(messageSender).send(captor.capture());
+        assertThat(captor.getValue().getExtensions()).hasAtLeastOneElementOfType(SignatureAlgorithmsExtension.class);
+        assertThat(captor.getValue().getExtensions()).hasAtLeastOneElementOfType(CertificateAuthoritiesExtension.class);
+    }
+
+    @Test
+    void requiredClientAuthRejectsEmptyCertificate() throws Exception {
+        X509TrustManager trustManager = mock(X509TrustManager.class);
+        when(trustManager.getAcceptedIssuers()).thenReturn(new X509Certificate[0]);
+        engine.setClientAuth(trustManager, true);
+        engine.received(createDefaultClientHello(), ProtectionKeysType.None);
+
+        assertThatThrownBy(() -> engine.received(new CertificateMessage((X509Certificate) null), ProtectionKeysType.Handshake))
+                .isInstanceOf(BadCertificateAlert.class);
+    }
+
+    @Test
+    void clientCertificateIsValidatedByConfiguredTrustManager() throws Exception {
+        X509TrustManager trustManager = mock(X509TrustManager.class);
+        when(trustManager.getAcceptedIssuers()).thenReturn(new X509Certificate[0]);
+        engine.setClientAuth(trustManager, true);
+        engine.received(createDefaultClientHello(), ProtectionKeysType.None);
+
+        engine.received(new CertificateMessage(serverCertificate), ProtectionKeysType.Handshake);
+
+        verify(trustManager).checkClientTrusted(new X509Certificate[] { serverCertificate }, "RSA");
     }
 
     @Test

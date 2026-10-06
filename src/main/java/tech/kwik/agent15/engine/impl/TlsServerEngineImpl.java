@@ -27,18 +27,23 @@ import tech.kwik.agent15.engine.*;
 import tech.kwik.agent15.extension.*;
 import tech.kwik.agent15.handshake.*;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.security.PrivateKey;
+import java.nio.charset.StandardCharsets;
 import java.security.cert.X509Certificate;
 import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import javax.net.ssl.X509TrustManager;
+
 import static tech.kwik.agent15.TlsConstants.CipherSuite.TLS_AES_128_GCM_SHA256;
 import static tech.kwik.agent15.TlsConstants.NamedGroup.x25519;
 import static tech.kwik.agent15.TlsConstants.PskKeyExchangeMode.psk_dhe_ke;
+import static tech.kwik.agent15.TlsConstants.SignatureScheme.*;
 
 public class TlsServerEngineImpl extends TlsEngineImpl implements TlsServerEngine, ServerMessageProcessor {
 
@@ -47,6 +52,7 @@ public class TlsServerEngineImpl extends TlsEngineImpl implements TlsServerEngin
         Start,
         ReceivedClientHello,
         Negotiated,
+        WaitClientCertificateVerify,
         WaitFinished,
         Connected
     }
@@ -70,6 +76,18 @@ public class TlsServerEngineImpl extends TlsEngineImpl implements TlsServerEngin
     private Long maxEarlyDataSize = 0xffffffffL;  // Simply use max.
     private byte[] additionalSessionData;
     private Function<ByteBuffer, Boolean> sessionDataVerificationCallback;
+    private X509TrustManager clientTrustManager;
+    private boolean clientAuthRequired;
+    private X509Certificate clientCertificate;
+
+    private static final List<SignatureScheme> CLIENT_AUTH_SIGNATURE_SCHEMES = List.of(
+            rsa_pss_rsae_sha256,
+            rsa_pss_rsae_sha384,
+            rsa_pss_rsae_sha512,
+            ecdsa_secp256r1_sha256,
+            ecdsa_secp384r1_sha384,
+            ecdsa_secp521r1_sha512
+    );
 
     /**
      * Create new TLS server engine.
@@ -180,7 +198,7 @@ public class TlsServerEngineImpl extends TlsEngineImpl implements TlsServerEngin
         // Start building TLS state and prepare response. First check whether client wants to use PSK (resumption)
         boolean earlyDataAccepted = false;
         Integer selectedIdentity = null;
-        if (pskExtension.isPresent()) {
+        if (clientTrustManager == null && pskExtension.isPresent()) {
             // "If clients offer "pre_shared_key" without a "psk_key_exchange_modes" extension, servers MUST abort the handshake."
             if (clientSupportedKeyExchangeModes.isEmpty()) {
                 throw new MissingExtensionAlert("psk_key_exchange_modes extension required with pre_shared_key");
@@ -267,6 +285,21 @@ public class TlsServerEngineImpl extends TlsEngineImpl implements TlsServerEngin
         serverMessageSender.send(encryptedExtensions);
         transcriptHash.record(encryptedExtensions);
 
+        if (clientTrustManager != null) {
+            List<Extension> clientAuthExtensions = new ArrayList<>();
+            clientAuthExtensions.add(new SignatureAlgorithmsExtension(CLIENT_AUTH_SIGNATURE_SCHEMES));
+            List<javax.security.auth.x500.X500Principal> authorities = Arrays.stream(clientTrustManager.getAcceptedIssuers())
+                    .map(X509Certificate::getSubjectX500Principal)
+                    .distinct()
+                    .toList();
+            if (!authorities.isEmpty()) {
+                clientAuthExtensions.add(new CertificateAuthoritiesExtension(authorities));
+            }
+            CertificateRequestMessage certificateRequest = new CertificateRequestMessage(clientAuthExtensions);
+            serverMessageSender.send(certificateRequest);
+            transcriptHash.recordServer(certificateRequest);
+        }
+
         // Only if session is not started with a PSK resumption, send certificate and certificate verify
         if (selectedIdentity == null) {
             CertificateMessage certificate = new CertificateMessage(serverCertificateChain);
@@ -298,6 +331,83 @@ public class TlsServerEngineImpl extends TlsEngineImpl implements TlsServerEngin
                 .filter(clientAlgorithms::contains)
                 .findFirst()
                 .orElseThrow(() -> new HandshakeFailureAlert("Failed to negotiate signature algorithm"));
+    }
+
+    @Override
+    public void setClientAuth(X509TrustManager trustManager, boolean required) {
+        this.clientTrustManager = Objects.requireNonNull(trustManager, "client trust manager is required");
+        this.clientAuthRequired = required;
+    }
+
+    @Override
+    public void received(CertificateMessage certificateMessage, ProtectionKeysType protectedBy)
+            throws TlsProtocolException {
+        if (protectedBy != ProtectionKeysType.Handshake) {
+            throw new UnexpectedMessageAlert("incorrect protection level");
+        }
+        if (status != Status.WaitFinished) {
+            throw new UnexpectedMessageAlert("unexpected client certificate message");
+        }
+        if (certificateMessage.getRequestContext().length != 0) {
+            throw new IllegalParameterAlert("client certificate request context should be empty");
+        }
+
+        transcriptHash.recordClient(certificateMessage);
+        clientCertificate = certificateMessage.getEndEntityCertificate();
+        if (clientCertificate == null) {
+            if (clientAuthRequired) {
+                throw new BadCertificateAlert("client certificate is required");
+            }
+            return;
+        }
+
+        try {
+            X509Certificate[] chain = certificateMessage.getCertificateChain().toArray(X509Certificate[]::new);
+            clientTrustManager.checkClientTrusted(chain, clientCertificate.getPublicKey().getAlgorithm());
+        } catch (Exception e) {
+            throw new BadCertificateAlert("client certificate validation failed: " + e.getMessage());
+        }
+        status = Status.WaitClientCertificateVerify;
+    }
+
+    @Override
+    public void received(CertificateVerifyMessage certificateVerifyMessage, ProtectionKeysType protectedBy)
+            throws TlsProtocolException {
+        if (protectedBy != ProtectionKeysType.Handshake) {
+            throw new UnexpectedMessageAlert("incorrect protection level");
+        }
+        if (status != Status.WaitClientCertificateVerify || clientCertificate == null) {
+            throw new UnexpectedMessageAlert("unexpected client certificate verify message");
+        }
+
+        SignatureScheme scheme = certificateVerifyMessage.getSignatureScheme();
+        if (scheme == null || !CLIENT_AUTH_SIGNATURE_SCHEMES.contains(scheme)) {
+            throw new HandshakeFailureAlert("client certificate signature scheme is not supported");
+        }
+        if (!verifyClientSignature(certificateVerifyMessage.getSignature(), scheme,
+                transcriptHash.getClientHash(TlsConstants.HandshakeType.certificate))) {
+            throw new DecryptErrorAlert("client certificate signature verification failed");
+        }
+        transcriptHash.recordClient(certificateVerifyMessage);
+        status = Status.WaitFinished;
+    }
+
+    private boolean verifyClientSignature(byte[] signatureBytes, SignatureScheme scheme, byte[] hash)
+            throws HandshakeFailureAlert {
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        try {
+            input.write(new byte[64]);
+            input.write("TLS 1.3, client CertificateVerify".getBytes(StandardCharsets.US_ASCII));
+            input.write(0);
+            input.write(hash);
+
+            java.security.Signature verifier = getSignatureAlgorithm(scheme);
+            verifier.initVerify(clientCertificate);
+            verifier.update(input.toByteArray());
+            return verifier.verify(signatureBytes);
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private boolean isAcceptable(byte[] sessionData) {
@@ -422,4 +532,3 @@ public class TlsServerEngineImpl extends TlsEngineImpl implements TlsServerEngin
         this.sessionDataVerificationCallback = callback;
     }
 }
-
